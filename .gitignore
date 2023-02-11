@@ -128,3 +128,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 docker_sql/ny_taxi_postgres_data
+*.csv
+*.parquet
