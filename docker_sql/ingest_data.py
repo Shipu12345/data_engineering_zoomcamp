@@ -1,31 +1,46 @@
+import os
+import argparse
+from time import time
+from datetime import timedelta
 import pandas as pd
 from sqlalchemy import create_engine
-from time import time
-import argparse
-import os
+from prefect import flow, task
+from prefect.tasks import task_input_hash
+from ingest_types import IIngestDataParams
+from ingest_arguments import IngestParams
 
-def main(params):
-    user = params.user
-    password = params.password
-    port = params.port
-    database = params.database
-    table = params.table
-    host = params.host
+
+@task(log_prints=True, cache_key_fn=task_input_hash, cache_expiration=timedelta(days=1))
+def extract_data(params: IIngestDataParams) -> pd.DataFrame:
     file_link = params.file_link
 
     # parquet file name
-    file_name = file_link.split('/')[-1]
+    file_name = file_link.split("/")[-1]
 
     # Download the file
     os.system(f"wget {file_link}")
 
-    df = pd.read_parquet(file_name)
+    return pd.read_parquet(file_name)
 
-    engine = create_engine(f"postgresql://{user}:{password}@{host}:{port}/{database}")
 
-    df.head(n=0).to_sql(name=table, con=engine, if_exists="replace")
+@task(log_prints=True)
+def transform_data(df: pd.DataFrame) -> pd.DataFrame:
+    print(f"pre: missing count:  { df['passenger_count'].isin([0]).sum() }")
+    df = df[df["passenger_count"] != 0]
+    print(f"post: missing count:  { df['passenger_count'].isin([0]).sum() }")
 
-    CHUNK_SIZE = 100000
+    return df
+
+
+@task(log_prints=True, retries=3)
+def ingest_data(client: IIngestDataParams, df: pd.DataFrame) -> None:
+    engine = create_engine(
+        f"postgresql://{client.user}:{client.password}@{client.host}:{client.port}/{client.database}"
+    )
+
+    df.head(n=0).to_sql(name=client.table, con=engine, if_exists="replace")
+
+    CHUNK_SIZE = 50000
     for chunk_num in range(len(df) // CHUNK_SIZE + 1):
         s_time = time()
 
@@ -34,20 +49,20 @@ def main(params):
         chunk = df[start_index:end_index]
 
         chunk.to_sql(
-            name=table,
+            name=client.table,
             con=engine,
             if_exists="append",
             index=False,
-            method="multi"
+            method="multi",
         )
 
         e_time = time()
         print(f"inserted {chunk_num+1} no. chunk, total time spent: {e_time-s_time:.3f} seconds")
 
 
-if __name__ == "__main__":
+@flow(name="Ingest Flow")
+def main_flow():
     parser = argparse.ArgumentParser(description="Ingest Parquet Data to Postgres")
-
     parser.add_argument("--user", help="user name for postgres")
     parser.add_argument("--password", help="password for postgres")
     parser.add_argument("--host", help="host name for postgres")
@@ -57,10 +72,16 @@ if __name__ == "__main__":
     parser.add_argument("--file_link", help="file path of parquet file")
 
     args = parser.parse_args()
-    main(args)
+    ingest_data_client = IngestParams(args)
+
+    df = extract_data(ingest_data_client)
+    data = transform_data(df)
+
+    ingest_data(ingest_data_client, data)
 
 
-
+if __name__ == "__main__":
+    main_flow()
 
 
 # python ingest_data.py \
