@@ -4,6 +4,7 @@ from time import time
 from datetime import timedelta
 import pandas as pd
 from sqlalchemy import create_engine
+from prefect_sqlalchemy import SqlAlchemyConnector
 from prefect import flow, task
 from prefect.tasks import task_input_hash
 from ingest_types import IIngestDataParams
@@ -34,40 +35,36 @@ def transform_data(df: pd.DataFrame) -> pd.DataFrame:
 
 @task(log_prints=True, retries=3)
 def ingest_data(client: IIngestDataParams, df: pd.DataFrame) -> None:
-    engine = create_engine(
-        f"postgresql://{client.user}:{client.password}@{client.host}:{client.port}/{client.database}"
-    )
+    connection_block = SqlAlchemyConnector.load("postgres-connector")
 
-    df.head(n=0).to_sql(name=client.table, con=engine, if_exists="replace")
+    with connection_block.get_connection(begin=False) as engine:
+        df.head(n=0).to_sql(name=client.table, con=engine, if_exists="replace")
 
-    CHUNK_SIZE = 50000
-    for chunk_num in range(len(df) // CHUNK_SIZE + 1):
-        s_time = time()
+        CHUNK_SIZE = 50000
+        for chunk_num in range(len(df) // CHUNK_SIZE + 1):
+            s_time = time()
 
-        start_index = chunk_num * CHUNK_SIZE
-        end_index = min(chunk_num * CHUNK_SIZE + CHUNK_SIZE, len(df))
-        chunk = df[start_index:end_index]
+            start_index = chunk_num * CHUNK_SIZE
+            end_index = min(chunk_num * CHUNK_SIZE + CHUNK_SIZE, len(df))
+            chunk = df[start_index:end_index]
 
-        chunk.to_sql(
-            name=client.table,
-            con=engine,
-            if_exists="append",
-            index=False,
-            method="multi",
-        )
+            chunk.to_sql(
+                name=client.table,
+                con=engine,
+                if_exists="append",
+                index=False,
+                method="multi",
+            )
 
-        e_time = time()
-        print(f"inserted {chunk_num+1} no. chunk, total time spent: {e_time-s_time:.3f} seconds")
+            e_time = time()
+            print(
+                f"inserted {chunk_num+1} no. chunk, total time spent: {e_time-s_time:.3f} seconds"
+            )
 
 
 @flow(name="Ingest Flow")
 def main_flow():
     parser = argparse.ArgumentParser(description="Ingest Parquet Data to Postgres")
-    parser.add_argument("--user", help="user name for postgres")
-    parser.add_argument("--password", help="password for postgres")
-    parser.add_argument("--host", help="host name for postgres")
-    parser.add_argument("--port", help="port for postgres")
-    parser.add_argument("--database", help="database name for postgres")
     parser.add_argument("--table", help="table name for postgres")
     parser.add_argument("--file_link", help="file path of parquet file")
 
